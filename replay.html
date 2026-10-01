@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Replay 40s</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,sans-serif;overflow:hidden}
+  #cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover}
+  #top{position:fixed;top:0;left:0;right:0;padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 12px;
+       display:flex;justify-content:space-between;align-items:center;background:linear-gradient(#000a,transparent)}
+  #buf{font-weight:600;font-size:15px}
+  #dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#e33;margin-right:6px;animation:b 1s infinite}
+  @keyframes b{50%{opacity:.2}}
+  #bottom{position:fixed;bottom:0;left:0;right:0;padding:16px 16px calc(env(safe-area-inset-bottom,0px) + 24px);
+          display:flex;justify-content:center;align-items:center;gap:24px}
+  button{font:inherit;color:#fff;border:0;border-radius:999px;padding:12px 18px;background:#ffffff30;backdrop-filter:blur(8px)}
+  #save{width:84px;height:84px;padding:0;background:#e33;border:5px solid #fff;font-weight:700}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;background:#111;text-align:center;padding:24px}
+  #start button{background:#e33;font-size:18px;padding:16px 28px}
+  #result{position:fixed;inset:0;background:#000e;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:16px}
+  #result video{max-width:100%;max-height:65%;border-radius:12px}
+  #msg{position:fixed;top:70px;left:0;right:0;text-align:center;font-size:14px;color:#ffd}
+</style>
+</head>
+<body>
+<video id="cam" autoplay playsinline muted></video>
+
+<div id="top">
+  <div><span id="dot"></span><span id="buf">Buffer: 0s / 40s</span></div>
+  <button id="flip">Virar câmera</button>
+</div>
+<div id="msg"></div>
+
+<div id="bottom"><button id="save">SALVAR<br>40s</button></div>
+
+<div id="start">
+  <h2>Replay de 40 segundos</h2>
+  <p>A câmera grava continuamente e, ao tocar em SALVAR, guarda o que aconteceu antes.</p>
+  <button id="go">Ativar câmera</button>
+</div>
+
+<div id="result">
+  <video id="prev" controls playsinline></video>
+  <div>
+    <button id="share">Salvar / Compartilhar</button>
+    <button id="close">Fechar</button>
+  </div>
+</div>
+
+<script>
+const TARGET = 40000;          // segundos desejados no replay
+const N = 3;                   // gravadores alternados
+const SEG = 60000;             // cada gravador roda 60s e reinicia
+const OFFSET = SEG / N;        // defasagem entre eles (20s)
+
+const $ = id => document.getElementById(id);
+let stream = null, facing = 'environment', slots = [], mime = '', lastBlob = null, wake = null;
+
+function pickMime() {
+  const c = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  return c.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+}
+
+async function startCamera() {
+  stopAll();
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: true
+  });
+  $('cam').srcObject = stream;
+  mime = pickMime();
+  slots = Array.from({ length: N }, (_, i) => ({ i, rec: null, chunks: [], start: 0, timer: null, delay: null }));
+  slots.forEach((s, i) => s.delay = setTimeout(() => cycle(s), i * OFFSET));
+  try { wake = await navigator.wakeLock?.request('screen'); } catch {}
+}
+
+function cycle(slot) {
+  if (!stream) return;
+  slot.chunks = [];
+  const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  rec.ondataavailable = e => { if (e.data.size) slot.chunks.push(e.data); };
+  rec.start(1000);
+  slot.rec = rec;
+  slot.start = Date.now();
+  slot.timer = setTimeout(() => { rec.onstop = () => cycle(slot); rec.stop(); }, SEG);
+}
+
+function stopAll() {
+  slots.forEach(s => {
+    clearTimeout(s.timer); clearTimeout(s.delay);
+    if (s.rec && s.rec.state !== 'inactive') { s.rec.onstop = null; s.rec.stop(); }
+  });
+  slots = [];
+  stream?.getTracks().forEach(t => t.stop());
+  stream = null;
+}
+
+function elapsed(s) { return s.rec && s.rec.state === 'recording' ? Date.now() - s.start : 0; }
+
+function save() {
+  const best = slots.reduce((a, b) => elapsed(b) > elapsed(a) ? b : a, slots[0]);
+  if (!best || elapsed(best) < 2000) { flash('Aguarde alguns segundos de gravação'); return; }
+  const secs = Math.round(elapsed(best) / 1000);
+  clearTimeout(best.timer);
+  best.rec.onstop = () => {
+    lastBlob = new Blob(best.chunks, { type: mime || 'video/webm' });
+    $('prev').src = URL.createObjectURL(lastBlob);
+    $('result').style.display = 'flex';
+    flash(`Clipe salvo: ~${Math.min(secs, 60)}s`);
+    cycle(best);   // reinicia esse gravador
+  };
+  best.rec.stop();
+}
+
+async function shareOrDownload() {
+  const ext = (lastBlob.type.includes('mp4')) ? 'mp4' : 'webm';
+  const file = new File([lastBlob], `replay-${Date.now()}.${ext}`, { type: lastBlob.type });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return; } catch {}
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(lastBlob);
+  a.download = file.name;
+  a.click();
+}
+
+function flash(t) { $('msg').textContent = t; setTimeout(() => $('msg').textContent = '', 3000); }
+
+setInterval(() => {
+  if (!slots.length) return;
+  const max = Math.max(...slots.map(elapsed));
+  $('buf').textContent = `Buffer: ${Math.min(Math.floor(max / 1000), 40)}s / 40s`;
+}, 500);
+
+$('go').onclick = async () => {
+  try { await startCamera(); $('start').style.display = 'none'; }
+  catch (e) { alert('Não consegui acessar a câmera. Use HTTPS e permita o acesso.\n' + e.message); }
+};
+$('flip').onclick = async () => { facing = facing === 'environment' ? 'user' : 'environment'; await startCamera(); };
+$('save').onclick = save;
+$('share').onclick = shareOrDownload;
+$('close').onclick = () => { $('result').style.display = 'none'; $('prev').pause(); };
+document.addEventListener('visibilitychange', async () => {
+  if (!document.hidden && stream) { try { wake = await navigator.wakeLock?.request('screen'); } catch {} }
+});
+</script>
+</body>
+</html>
