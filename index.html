@@ -22,6 +22,12 @@
   #result{position:fixed;inset:0;background:#000e;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:16px}
   #result video{max-width:100%;max-height:65%;border-radius:12px}
   #key{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 118px);text-align:center;font-size:12px;color:#fff9}
+  #list{position:fixed;inset:0;background:#111;display:none;flex-direction:column;z-index:5}
+  #list .lh{display:flex;justify-content:space-between;align-items:center;padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 12px}
+  #items{overflow:auto;padding:0 16px 24px;display:flex;flex-direction:column;gap:14px}
+  #items .row{display:flex;flex-direction:column;gap:6px;font-size:14px}
+  #items video{width:100%;max-height:50vh;border-radius:10px;background:#000}
+  #items a{color:#7cf}
   #msg{position:fixed;top:70px;left:0;right:0;text-align:center;font-size:14px;color:#ffd}
 </style>
 </head>
@@ -29,8 +35,9 @@
 <video id="cam" autoplay playsinline muted></video>
 
 <div id="top">
-  <div><span id="dot"></span><span id="buf">Buffer: 0s / 40s</span></div>
-  <button id="flip">Virar câmera</button>
+  <div><span id="dot"></span><span id="buf">Buffer: 0s / 40s</span>
+    <div id="cloud" style="font-size:12px;opacity:.85"></div></div>
+  <div><button id="vids">Vídeos</button> <button id="flip">Virar câmera</button></div>
 </div>
 <div id="msg"></div>
 <div id="key">Controle: aguardando botão...</div>
@@ -41,6 +48,11 @@
   <h2>Replay de 40 segundos</h2>
   <p>A câmera grava continuamente e, ao tocar em SALVAR, guarda o que aconteceu antes.</p>
   <button id="go">Ativar câmera</button>
+</div>
+
+<div id="list">
+  <div class="lh"><b>Vídeos enviados</b><button id="closeList">Fechar</button></div>
+  <div id="items"></div>
 </div>
 
 <div id="result">
@@ -81,7 +93,7 @@ async function startCamera() {
 function cycle(slot) {
   if (!stream) return;
   slot.chunks = [];
-  const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  const rec = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), videoBitsPerSecond: 2500000 });
   rec.ondataavailable = e => { if (e.data.size) slot.chunks.push(e.data); };
   rec.start(1000);
   slot.rec = rec;
@@ -108,9 +120,14 @@ function save() {
   clearTimeout(best.timer);
   best.rec.onstop = () => {
     lastBlob = new Blob(best.chunks, { type: mime || 'video/webm' });
-    $('prev').src = URL.createObjectURL(lastBlob);
-    $('result').style.display = 'flex';
-    flash(`Clipe salvo: ~${Math.min(secs, 60)}s`);
+    if (CLOUD_ON) {
+      enqueue(lastBlob);
+      flash(`Clipe de ~${Math.min(secs, 60)}s na fila de envio`);
+    } else {
+      $('prev').src = URL.createObjectURL(lastBlob);
+      $('result').style.display = 'flex';
+      flash(`Clipe salvo: ~${Math.min(secs, 60)}s`);
+    }
     cycle(best);   // reinicia esse gravador
   };
   best.rec.stop();
@@ -151,6 +168,118 @@ window.addEventListener('keydown', e => {
   lastRemote = Date.now();
   save();
 }, true);
+
+// ---- Nuvem (Supabase) ----
+const SUPABASE_URL  = 'https://iojoxxpfrbzemlxjscbe.supabase.co';
+const SUPABASE_KEY  = 'sb_publishable_WYMIMsXMDfEjOx05IQlpMQ_TCoVSZ5Z';       // chave "anon" (eyJ...) ou "publishable" (sb_publishable_...)
+const BUCKET        = 'replays';
+const CLOUD_ON = !SUPABASE_URL.startsWith('COLE') && !SUPABASE_KEY.startsWith('COLE');
+const sbHeaders = { apikey: SUPABASE_KEY };
+if (SUPABASE_KEY.startsWith('eyJ')) sbHeaders.Authorization = 'Bearer ' + SUPABASE_KEY;
+
+// fila persistente no aparelho (IndexedDB): se a rede cair, o clipe não se perde
+function openDb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('replay-queue', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('clips', { keyPath: 'id' });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function tx(mode, fn) {
+  const d = await openDb();
+  return new Promise((res, rej) => {
+    const t = d.transaction('clips', mode);
+    const req = fn(t.objectStore('clips'));
+    t.oncomplete = () => res(req && req.result);
+    t.onerror = () => rej(t.error);
+  });
+}
+const qPut = c  => tx('readwrite', s => s.put(c));
+const qDel = id => tx('readwrite', s => s.delete(id));
+const qAll = () => tx('readonly',  s => s.getAll());
+
+async function enqueue(blob) {
+  const type = (blob.type || 'video/webm').split(';')[0];
+  const ext = type.includes('mp4') ? 'mp4' : 'webm';
+  const id = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  try { await qPut({ id, name: `replay-${stamp}-${id.slice(-4)}.${ext}`, type, blob }); }
+  catch (e) { flash('Erro ao guardar o clipe na fila'); return; }
+  processQueue();
+}
+
+function showQueue(n) {
+  $('cloud').textContent = CLOUD_ON ? (n ? `☁ ${n} na fila de envio` : '☁ tudo enviado') : '';
+}
+
+let sending = false;
+async function processQueue() {
+  if (!CLOUD_ON || sending) return;
+  sending = true;
+  try {
+    for (;;) {
+      const items = await qAll();
+      showQueue(items.length);
+      if (!items.length) break;
+      const c = items[0];
+      const r = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${encodeURIComponent(c.name)}`, {
+        method: 'POST',
+        headers: { ...sbHeaders, 'Content-Type': c.type },
+        body: c.blob
+      });
+      if (!r.ok) {
+        const txt = await r.text();
+        if (!/already exists|Duplicate/i.test(txt)) throw new Error(txt);   // já enviado antes = ok
+      }
+      await qDel(c.id);
+      flash('Clipe enviado ✔');
+    }
+  } catch (e) {
+    $('cloud').textContent = '☁ envio falhou, tentando de novo...';
+    setTimeout(processQueue, 15000);
+  } finally { sending = false; }
+}
+window.addEventListener('online', processQueue);
+setInterval(processQueue, 30000);
+
+// ---- Lista de vídeos enviados ----
+async function openList() {
+  $('list').style.display = 'flex';
+  const box = $('items');
+  box.textContent = 'Carregando...';
+  try {
+    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/list/${BUCKET}`, {
+      method: 'POST',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefix: '', limit: 200, sortBy: { column: 'created_at', order: 'desc' } })
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const files = (await r.json()).filter(f => f.name && f.id);
+    if (!files.length) { box.textContent = 'Nenhum vídeo ainda.'; return; }
+    box.innerHTML = '';
+    files.forEach(f => {
+      const url = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${encodeURIComponent(f.name)}`;
+      const when = new Date(f.created_at).toLocaleString('pt-BR');
+      const size = f.metadata && f.metadata.size ? ' · ' + (f.metadata.size / 1048576).toFixed(1) + ' MB' : '';
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `<video src="${url}#t=0.1" preload="metadata" controls playsinline></video>
+        <div>${when}${size} · <a href="${url}?download=${encodeURIComponent(f.name)}">Baixar</a></div>`;
+      box.appendChild(row);
+    });
+  } catch (e) { box.textContent = 'Erro ao listar: ' + e.message; }
+}
+$('vids').onclick = () => CLOUD_ON ? openList() : flash('Configure o Supabase no arquivo primeiro');
+$('closeList').onclick = () => { $('list').style.display = 'none'; };
+
+// abrir só a lista (ex.: no notebook): .../Replay/?videos
+if (new URLSearchParams(location.search).has('videos')) {
+  ['start', 'bottom', 'top', 'key'].forEach(id => $(id).style.display = 'none');
+  $('closeList').style.display = 'none';
+  if (CLOUD_ON) openList(); else $('items').textContent = 'Supabase não configurado.';
+}
+if (CLOUD_ON) processQueue();
 
 $('go').onclick = async () => {
   try { await startCamera(); $('start').style.display = 'none'; }
