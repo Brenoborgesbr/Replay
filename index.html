@@ -67,7 +67,7 @@
 const TARGET = 40000;          // segundos desejados no replay
 const N = 6;                   // gravadores alternados
 const SEG = 60000;             // cada gravador roda 60s e reinicia
-const OFFSET = SEG / N;        // defasagem entre eles (10s)
+const OFFSET = SEG / N;        // defasagem entre eles (20s)
 
 const $ = id => document.getElementById(id);
 let stream = null, facing = 'environment', slots = [], mime = '', lastBlob = null, wake = null;
@@ -156,7 +156,7 @@ setInterval(() => {
 // ---- Botão bluetooth (controle de tripé) ----
 // Esses controles se comportam como um teclado: enviam Enter, Espaço, Volume+ etc.
 const REMOTE_KEYS = ['Enter', ' ', 'AudioVolumeUp', 'AudioVolumeDown', 'VolumeUp', 'VolumeDown',
-                     'MediaPlayPause', 'MediaTrackNext', 'MediaTrackPrevious', 'PageUp', 'PageDown', 'ArrowUp', 'ArrowDown'];
+                     'MediaPlayPause', 'MediaTrackNext', 'MediaTrackPrevious', 'PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
 let lastRemote = 0;
 window.addEventListener('keydown', e => {
   // mostra a tecla recebida, para descobrir o que o seu controle envia
@@ -281,8 +281,34 @@ if (new URLSearchParams(location.search).has('videos')) {
 }
 if (CLOUD_ON) processQueue();
 
+// ---- Gatilho remoto (Apple Watch / Atalhos via Supabase) ----
+// O atalho atualiza uma linha na tabela replay_trigger; a página checa a cada 1,5s e salva quando ela muda.
+let remoteLast = null, remoteTimer = null, remoteBusy = false;
+function startRemotePoll() {
+  if (!CLOUD_ON || remoteTimer) return;
+  remoteTimer = setInterval(async () => {
+    if (!stream || remoteBusy) return;
+    remoteBusy = true;
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/replay_trigger?id=eq.1&select=pressed_at`,
+                            { headers: sbHeaders, cache: 'no-store' });
+      if (!r.ok) return;
+      const row = (await r.json())[0];
+      if (!row) return;
+      if (remoteLast === null) { remoteLast = row.pressed_at; return; }   // primeira leitura: só memoriza
+      if (row.pressed_at !== remoteLast) {
+        remoteLast = row.pressed_at;
+        if ($('result').style.display !== 'flex' && Date.now() - lastRemote > 1500) {
+          lastRemote = Date.now();
+          save();
+        }
+      }
+    } catch (e) {} finally { remoteBusy = false; }
+  }, 1500);
+}
+
 $('go').onclick = async () => {
-  try { await startCamera(); $('start').style.display = 'none'; }
+  try { await startCamera(); $('start').style.display = 'none'; startRemotePoll(); }
   catch (e) { alert('Não consegui acessar a câmera. Use HTTPS e permita o acesso.\n' + e.message); }
 };
 $('flip').onclick = async () => { facing = facing === 'environment' ? 'user' : 'environment'; await startCamera(); };
