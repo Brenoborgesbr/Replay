@@ -31,7 +31,7 @@
   #zoom{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 128px);display:none;justify-content:center;gap:10px}
   #zoom button{width:46px;height:46px;padding:0;font-size:13px;font-weight:700;background:#0008}
   #zoom button.on{color:#fc0;transform:scale(1.1)}
-  #lens{font-size:11px;opacity:.6;margin-top:2px}
+  #lens{display:none}
   #msg{position:fixed;top:70px;left:0;right:0;text-align:center;font-size:14px;color:#ffd}
 </style>
 </head>
@@ -84,7 +84,7 @@ function pickMime() {
 
 async function startCamera() {
   stopAll();
-  const video = { width: { ideal: 1280 }, height: { ideal: 720 } };
+  const video = { width: { ideal: 1920 }, height: { ideal: 1080 } };
   if (facing === 'environment' && backDeviceId) video.deviceId = { exact: backDeviceId };
   else video.facingMode = facing;
   try {
@@ -201,7 +201,7 @@ function markZoom() {
 function cycle(slot) {
   if (!stream) return;
   slot.chunks = [];
-  const rec = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), videoBitsPerSecond: 2500000 });
+  const rec = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), videoBitsPerSecond: 5000000 });
   rec.ondataavailable = e => { if (e.data.size) slot.chunks.push(e.data); };
   rec.start(1000);
   slot.rec = rec;
