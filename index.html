@@ -159,7 +159,7 @@ const REMOTE_KEYS = ['Enter', ' ', 'AudioVolumeUp', 'AudioVolumeDown', 'VolumeUp
 let lastRemote = 0;
 window.addEventListener('keydown', e => {
   // mostra a tecla recebida, para descobrir o que o seu controle envia
-  $('key').textContent = `Controle: key="${e.key}" code="${e.code}" keyCode=${e.keyCode}`;
+  if ($('key')) $('key').textContent = `Controle: key="${e.key}" code="${e.code}" keyCode=${e.keyCode}`;
   if (!stream || $('result').style.display === 'flex') return;
   if (!REMOTE_KEYS.includes(e.key) && ![24, 25, 175, 176, 179].includes(e.keyCode)) return;
   e.preventDefault();
@@ -274,7 +274,7 @@ $('closeList').onclick = () => { $('list').style.display = 'none'; };
 
 // abrir só a lista (ex.: no notebook): .../Replay/?videos
 if (new URLSearchParams(location.search).has('videos')) {
-  ['start', 'bottom', 'top', 'key'].forEach(id => $(id).style.display = 'none');
+  ['start', 'bottom', 'top', 'key'].forEach(id => { if ($(id)) $(id).style.display = 'none'; });
   $('closeList').style.display = 'none';
   if (CLOUD_ON) openList(); else $('items').textContent = 'Supabase não configurado.';
 }
