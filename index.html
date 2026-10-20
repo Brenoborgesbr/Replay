@@ -28,6 +28,10 @@
   #items .row{display:flex;flex-direction:column;gap:6px;font-size:14px}
   #items video{width:100%;max-height:50vh;border-radius:10px;background:#000}
   #items a{color:#7cf}
+  #zoom{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 128px);display:none;justify-content:center;gap:10px}
+  #zoom button{width:46px;height:46px;padding:0;font-size:13px;font-weight:700;background:#0008}
+  #zoom button.on{color:#fc0;transform:scale(1.1)}
+  #lens{font-size:11px;opacity:.6;margin-top:2px}
   #msg{position:fixed;top:70px;left:0;right:0;text-align:center;font-size:14px;color:#ffd}
 </style>
 </head>
@@ -36,11 +40,13 @@
 
 <div id="top">
   <div><span id="dot"></span><span id="buf">Buffer: 0s / 40s</span>
-    <div id="cloud" style="font-size:12px;opacity:.85"></div></div>
+    <div id="cloud" style="font-size:12px;opacity:.85"></div>
+    <div id="lens"></div></div>
   <div><button id="vids">Vídeos</button> <button id="flip">Virar câmera</button></div>
 </div>
 <div id="msg"></div>
 
+<div id="zoom"></div>
 <div id="bottom"><button id="save">SALVAR</button></div>
 
 <div id="start">
@@ -78,15 +84,118 @@ function pickMime() {
 
 async function startCamera() {
   stopAll();
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
-    audio: true
-  });
+  const video = { width: { ideal: 1280 }, height: { ideal: 720 } };
+  if (facing === 'environment' && backDeviceId) video.deviceId = { exact: backDeviceId };
+  else video.facingMode = facing;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video, audio: true });
+  } catch (e) {
+    if (!backDeviceId) throw e;
+    backDeviceId = null;                       // câmera escolhida não abriu: volta para a padrão
+    return startCamera();
+  }
+  // Na primeira vez, troca para a câmera "virtual" do iPhone que junta as lentes (0,5x / 1x / 2x).
+  // Os nomes das câmeras só aparecem depois que o usuário dá a permissão, por isso é feito aqui.
+  if (facing === 'environment' && !lensTried) {
+    lensTried = true;
+    const multi = await findMultiCam();
+    if (multi && multi !== stream.getVideoTracks()[0].getSettings().deviceId) {
+      backDeviceId = multi;
+      return startCamera();
+    }
+  }
   $('cam').srcObject = stream;
   mime = pickMime();
   slots = Array.from({ length: N }, (_, i) => ({ i, rec: null, chunks: [], start: 0, timer: null, delay: null }));
   slots.forEach((s, i) => s.delay = setTimeout(() => cycle(s), i * OFFSET));
   try { wake = await navigator.wakeLock?.request('screen'); } catch {}
+  setupLenses();
+}
+
+// ---- Lentes / zoom (0,5x, 1x, 2x) ----
+// Câmeras "virtuais" do iPhone que juntam várias lentes: com elas o zoom troca de lente de verdade
+// (0,5x = ultra-angular), sem zoom digital e sem reiniciar a gravação.
+const MULTI_UW = /triple|tripla|dual wide|dupla.*(grande|ampla)|(grande|ampla).*dupla/i;
+let backDeviceId = null, lensTried = false, lensMode = null, zoomBase = 1, zoomLevel = 1, lensDevices = {};
+
+async function backCams() {
+  const all = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  return all.filter(d => !/front|frontal|facetime/i.test(d.label));
+}
+async function findMultiCam() {
+  try {
+    const cams = await backCams();
+    const m = cams.find(d => /triple|tripla/i.test(d.label)) || cams.find(d => MULTI_UW.test(d.label));
+    return m ? m.deviceId : null;
+  } catch { return null; }
+}
+
+async function setupLenses() {
+  const box = $('zoom');
+  box.innerHTML = ''; box.style.display = 'none'; lensMode = null;
+  if (facing !== 'environment' || !stream) { $('lens').textContent = ''; return; }
+  const track = stream.getVideoTracks()[0];
+  const z = track.getCapabilities ? track.getCapabilities().zoom : null;
+  let levels = [];
+  if (z && z.max > z.min) {
+    // Modo 1: a câmera aceita zoom. Numa câmera virtual com ultra-angular, o zoom mínimo (1) é o 0,5x,
+    // então o "1x" do iPhone corresponde a 2 aqui. Se o navegador já entregar o mínimo como 0,5, usa direto.
+    lensMode = 'zoom';
+    zoomBase = z.min < 1 ? 1 : (MULTI_UW.test(track.label) ? 2 : 1);
+    levels = [0.5, 1, 2].filter(v => v * zoomBase >= z.min - 0.01 && v * zoomBase <= z.max + 0.01);
+    $('lens').textContent = `${track.label || 'câmera'} · zoom ${z.min}–${z.max}`;
+  } else {
+    // Modo 2: sem zoom no navegador. Troca de câmera física (reinicia o buffer).
+    lensMode = 'device';
+    const cams = await backCams();
+    const uw   = cams.find(d => /ultra/i.test(d.label));
+    const tele = cams.find(d => /tele/i.test(d.label));
+    const main = cams.find(d => !/ultra|tele|dual|dupla|triple|tripla/i.test(d.label));
+    lensDevices = {};
+    if (uw) lensDevices[0.5] = uw.deviceId;
+    if (main) lensDevices[1] = main.deviceId;
+    if (tele) lensDevices[2] = tele.deviceId;
+    levels = Object.keys(lensDevices).map(Number).sort((a, b) => a - b);
+    $('lens').textContent = `${track.label || 'câmera'} · sem zoom`;
+  }
+  if (levels.length < 2) return;
+  levels.forEach(v => {
+    const b = document.createElement('button');
+    b.textContent = v === 0.5 ? '.5' : v + 'x';
+    b.dataset.z = v;
+    b.onclick = () => chooseLens(v);
+    box.appendChild(b);
+  });
+  box.style.display = 'flex';
+  if (lensMode === 'zoom') applyZoom(levels.includes(zoomLevel) ? zoomLevel : 1);
+  else {
+    const cur = track.getSettings().deviceId;
+    const v = Object.keys(lensDevices).find(k => lensDevices[k] === cur);
+    zoomLevel = v ? Number(v) : 1;
+    markZoom();
+  }
+}
+
+async function applyZoom(v) {
+  const track = stream && stream.getVideoTracks()[0];
+  if (!track) return;
+  try {
+    await track.applyConstraints({ advanced: [{ zoom: v * zoomBase }] });
+    zoomLevel = v; markZoom();
+  } catch (e) { flash(`O aparelho não aceitou o zoom ${v}x`); }
+}
+
+async function chooseLens(v) {
+  if (v === zoomLevel) return;
+  if (lensMode === 'zoom') return applyZoom(v);
+  backDeviceId = lensDevices[v];
+  zoomLevel = v;
+  flash('Trocando de lente: o buffer recomeça');
+  try { await startCamera(); } catch (e) { flash('Não consegui abrir essa lente'); }
+}
+
+function markZoom() {
+  [...$('zoom').children].forEach(b => b.classList.toggle('on', Number(b.dataset.z) === zoomLevel));
 }
 
 function cycle(slot) {
@@ -274,7 +383,7 @@ $('closeList').onclick = () => { $('list').style.display = 'none'; };
 
 // abrir só a lista (ex.: no notebook): .../Replay/?videos
 if (new URLSearchParams(location.search).has('videos')) {
-  ['start', 'bottom', 'top', 'key'].forEach(id => { if ($(id)) $(id).style.display = 'none'; });
+  ['start', 'bottom', 'top', 'key', 'zoom'].forEach(id => { if ($(id)) $(id).style.display = 'none'; });
   $('closeList').style.display = 'none';
   if (CLOUD_ON) openList(); else $('items').textContent = 'Supabase não configurado.';
 }
