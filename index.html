@@ -71,6 +71,13 @@
   #items .row{background:var(--card);border-radius:16px;overflow:hidden;border-top:5px solid var(--c);box-shadow:0 6px 18px #0004}
   #items .row.s0{--c:var(--clay)} #items .row.s1{--c:var(--grass)} #items .row.s2{--c:var(--hard)}
   #items video{display:block;width:100%;aspect-ratio:16/9;max-height:50vh;background:#000;object-fit:contain}
+  #items .poster{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;width:100%;aspect-ratio:16/9;
+                 max-height:50vh;border-radius:0;padding:0;color:#fff;backdrop-filter:none;
+                 background:radial-gradient(circle at 50% 45%,color-mix(in srgb,var(--c) 55%,#000),#0b0f13)}
+  #items .poster small{font-size:12px;font-weight:600;opacity:.7}
+  #items .play{width:62px;height:62px;border-radius:50%;background:var(--ball);box-shadow:0 6px 18px #0007;position:relative}
+  #items .play::after{content:"";position:absolute;left:25px;top:19px;border-style:solid;border-width:12px 0 12px 19px;
+                      border-color:transparent transparent transparent var(--ink)}
   #items .meta{display:flex;align-items:center;gap:10px;padding:12px 14px}
   #items .when{flex:1;min-width:0}
   #items .when b{display:block;font-size:15px}
@@ -467,14 +474,25 @@ async function openList() {
       const size = f.metadata && f.metadata.size ? ' · ' + (f.metadata.size / 1048576).toFixed(1) + ' MB' : '';
       const row = document.createElement('div');
       row.className = 'row s' + (i % 3);   // alterna saibro / grama / dura
-      row.innerHTML = `<video src="${url}#t=0.1" preload="metadata" controls playsinline></video>
+      row.innerHTML = `<button class="poster" aria-label="Assistir"><span class="play"></span><small>Toque para assistir</small></button>
         <div class="meta"><div class="when"><b>${hour}</b><span>${day}${size}</span></div>
           <a class="dl" href="${url}?download=${encodeURIComponent(f.name)}">Baixar</a>
           <button class="del">Excluir</button></div>`;
+      row.querySelector('.poster').onclick = e => playVideo(e.currentTarget, url);
       row.querySelector('.del').onclick = () => deleteVideo(f.name, row);
       box.appendChild(row);
     });
   } catch (e) { emptyState('Erro ao listar: ' + e.message); }
+}
+
+// O vídeo só é baixado quando a pessoa toca: abrir a lista não gasta tráfego do Supabase
+function playVideo(poster, url) {
+  document.querySelectorAll('#items video').forEach(v => v.pause());
+  const v = document.createElement('video');
+  v.src = url; v.controls = true; v.autoplay = true; v.playsInline = true;
+  v.onplay = () => document.querySelectorAll('#items video').forEach(o => { if (o !== v) o.pause(); });
+  poster.replaceWith(v);
+  v.play().catch(() => {});
 }
 
 async function deleteVideo(name, row) {
@@ -491,7 +509,7 @@ async function deleteVideo(name, row) {
     // O Supabase responde com a lista do que apagou; vazia = sem permissão (política do bucket)
     const gone = await r.json();
     if (!Array.isArray(gone) || !gone.length) throw new Error('sem permissão para excluir (veja a política DELETE do bucket)');
-    row.querySelector('video').pause();
+    row.querySelector('video')?.pause();
     row.remove();
     const left = $('items').querySelectorAll('.row').length;
     setCount(left);
